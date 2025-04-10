@@ -74,23 +74,20 @@ struct AddTaskTypeView: View {
     @Environment(\.dismiss) var dismiss
     @ObservedObject var taskTypeStorage: TaskTypeStorage
     @State private var typeName: String = ""
-    @State private var selectedColorName: String = Theme.availableColors[0].name
+    @State private var selectedColor: Color = .blue
     
     var body: some View {
         NavigationView {
             Form {
                 TextField("Type Name", text: $typeName)
                 
-                Picker("Color", selection: $selectedColorName) {
-                    ForEach(Theme.availableColors, id: \.name) { colorInfo in
-                        HStack {
-                            Circle()
-                                .fill(colorInfo.color)
-                                .frame(width: 20, height: 20)
-                            Text(colorInfo.name)
-                        }
-                        .tag(colorInfo.name)
-                    }
+                ColorPicker("Select Color", selection: $selectedColor)
+                
+                HStack {
+                    Text("Preview:")
+                    Circle()
+                        .fill(selectedColor)
+                        .frame(width: 30, height: 30)
                 }
             }
             .navigationTitle("New Task Type")
@@ -98,7 +95,8 @@ struct AddTaskTypeView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         if !typeName.isEmpty {
-                            taskTypeStorage.addType(name: typeName, colorName: selectedColorName)
+                            let components = selectedColor.components
+                            taskTypeStorage.addType(name: typeName, colorName: "Custom", red: components.red, green: components.green, blue: components.blue)
                             dismiss()
                         }
                     }
