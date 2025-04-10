@@ -8,14 +8,50 @@
 import Foundation
 import CoreData
 import SwiftUI
+import Combine
 
 class TaskViewModel: ObservableObject {
     @Published var tasks: [TodoTaskEntity] = []
-    private let context: NSManagedObjectContext = PersistenceController.shared.context
+    @Published var showPeriodTransition = false
+    @ObservedObject var clockStorage: ClockStorage
+    private let context: NSManagedObjectContext
+    private var periodCheckTimer: Timer?
+    private var isHandlingOperation = false
+    
+    init(context: NSManagedObjectContext = PersistenceController.shared.context,
+         clockStorage: ClockStorage = ClockStorage()) {
+        self.context = context
+        self.clockStorage = clockStorage
+        fetchTasks()
+        setupPeriodCheck()
+    }
+    
+    private func setupPeriodCheck() {
+        // Check every hour for period end
+        periodCheckTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            self?.checkPeriodEnd()
+        }
+    }
+    
+    private func checkPeriodEnd() {
+        guard !isHandlingOperation else {
+            // If handling an operation, schedule a check in 5 seconds
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.checkPeriodEnd()
+            }
+            return
+        }
+        
+        let now = Date()
+        if now >= clockStorage.currentClock.endDate {
+            showPeriodTransition = true
+        }
+    }
 
     func fetchTasks() {
         let request: NSFetchRequest<TodoTaskEntity> = TodoTaskEntity.fetchRequest()
         request.sortDescriptors = [NSSortDescriptor(key: "dueDate", ascending: true)]
+        request.predicate = NSPredicate(format: "clockId == %@", clockStorage.currentClock.id as CVarArg)
 
         do {
             tasks = try context.fetch(request)
@@ -24,32 +60,71 @@ class TaskViewModel: ObservableObject {
         }
     }
 
-    func addTask(title: String, priority: Int16, dueDate: Date) {
+    func addTask(title: String, priority: Int16, dueDate: Date, taskType: TaskType) {
+        guard !showPeriodTransition else { return }
+        
+        isHandlingOperation = true
         let newTask = TodoTaskEntity(context: context)
         newTask.id = UUID()
         newTask.title = title
         newTask.isCompleted = false
         newTask.priority = priority
         newTask.dueDate = dueDate
+        newTask.originalDueDate = dueDate
+        newTask.taskType = taskType.name
+        newTask.taskTypeColor = taskType.color
+        newTask.clockId = clockStorage.currentClock.id
 
         save()
-        
-        do {
-                try context.save()
-                fetchTasks()
-            } catch {
-                print("Save error: \(error)")
-            }
+        isHandlingOperation = false
     }
 
     func toggleTaskCompletion(_ task: TodoTaskEntity) {
+        isHandlingOperation = true
         task.isCompleted.toggle()
         save()
+        isHandlingOperation = false
     }
 
     func deleteTask(_ task: TodoTaskEntity) {
+        isHandlingOperation = true
         context.delete(task)
         save()
+        isHandlingOperation = false
+    }
+    
+    func startNewPeriod(transferringTasks selectedTasks: [TodoTaskEntity]) {
+        isHandlingOperation = true
+        
+        // Archive current clock with stats
+        let stats = (
+            total: tasks.count,
+            completed: tasks.filter { $0.isCompleted }.count
+        )
+        clockStorage.archiveCurrent(withStats: stats)
+        
+        // Transfer selected tasks to new period
+        for task in selectedTasks {
+            let newTask = TodoTaskEntity(context: context)
+            newTask.id = UUID()
+            newTask.title = task.title
+            newTask.isCompleted = false
+            newTask.priority = task.priority
+            newTask.dueDate = Calendar.current.date(byAdding: .day, value: 7, to: Date()) ?? Date()
+            newTask.originalDueDate = task.originalDueDate
+            newTask.taskType = task.taskType
+            newTask.taskTypeColor = task.taskTypeColor
+            newTask.clockId = clockStorage.currentClock.id
+        }
+        
+        // Delete old tasks
+        for task in tasks {
+            context.delete(task)
+        }
+        
+        save()
+        showPeriodTransition = false
+        isHandlingOperation = false
     }
 
     private func save() {
@@ -58,18 +133,31 @@ class TaskViewModel: ObservableObject {
             fetchTasks()
         } catch {
             print("Save error: \(error)")
+            isHandlingOperation = false
         }
+    }
+    
+    deinit {
+        periodCheckTimer?.invalidate()
     }
 }
 
-// MARK: - ViewModel Extensions
+// MARK: - Task Filtering
 extension TaskViewModel {
     var pendingTasks: [TodoTaskEntity] {
-        tasks.filter { !$0.isCompleted }
+        tasks.filter { !$0.isCompleted && !$0.isOverdue }
     }
 
     var completedTasks: [TodoTaskEntity] {
-        tasks.filter { $0.isCompleted || ($0.dueDate ?? Date()) < Date() }
+        tasks.filter { $0.isCompleted }
+    }
+    
+    var overdueTasks: [TodoTaskEntity] {
+        tasks.filter { !$0.isCompleted && $0.isOverdue }
+    }
+    
+    var unfinishedTasks: [TodoTaskEntity] {
+        tasks.filter { !$0.isCompleted }
     }
 }
 
